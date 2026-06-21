@@ -236,6 +236,8 @@ WHERE "NIS FAVORECIDO" = 16250240692;
 
 ---
 
+![Tabela Resumo](tabela-resumo.png)
+
 ## 7. Inspeção do Plano de Execução (EXPLAIN ANALYZE)
 
 Para comprovar fisicamente a eficiência do *Predicate Pushdown* (Filtro Empurrado), vamos inspecionar a árvore de execução gerada pelo banco de dados.
