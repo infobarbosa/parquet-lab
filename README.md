@@ -9,47 +9,50 @@
 - Comparar tamanho dos arquivos no disco
 - Comparar performance em diferentes cenários
 
-## 2. Setup do Ambiente
+## 2. Setup do Ambiente (Via Docker)
 
-Este laboratório é executado em Linux Ubuntu 24.04 (ou superior). Antes de começar, prepare seu ambiente instalando as dependências e baixando os dados.
+Para garantir um ambiente isolado e padronizado, este laboratório utiliza Docker. Implementaremos uma arquitetura de dados separando a camada bruta (Raw) do seu diretório de trabalho.
 
-ATENÇÃO! Se estiver utilizando Cloud9, utilize esse [tutorial](https://github.com/infobarbosa/data-engineering-cloud9).
+### 2.A. Preparando os Diretórios
 
-### 2.A. Baixando a base de dados
-
-A base que vamos utilizar está disponível para download no portal da transparência [aqui](https://portaldatransparencia.gov.br/download-de-dados/novo-bolsa-familia/202604).
-
-### 2.B. Descompactando o arquivo CSV
-
-No terminal do Linux, execute:
+No terminal do seu computador (Linux/macOS), crie a estrutura de pastas:
 
 ```bash
+mkdir data
+mkdir workspace
+```
+
+### 2.B. Baixando a Base de Dados (Camada Raw)
+
+A base do Bolsa Família de Abril/2026 está disponível no Portal da Transparência [aqui](https://portaldatransparencia.gov.br/download-de-dados/novo-bolsa-familia/202604).
+
+Baixe o arquivo `.zip` e mova-o para a pasta `data/`. Em seguida, descompacte-o:
+
+```bash
+cd data/
 unzip 202604_NovoBolsaFamilia.zip
+cd ..
 ```
 
-### 2.C. Instalando as Ferramentas
+### 2.C. Construindo e Iniciando o Container
 
-Instale o `parquet-tools` utilizando o gerenciador de pacotes do Python (`pip`):
+Construa a imagem Docker. O arquivo `Dockerfile` já instalará o DuckDB e o utilitário `parquet-tools`.
 
 ```bash
-pip install parquet-tools
+docker build -t lab-parquet .
 ```
 
-Vamos instalar o DuckDB na versão mais recente para o Ubuntu:
+Agora, inicie o container mapeando os diretórios. A pasta `data` será montada como somente-leitura (`:ro`) para proteger os dados brutos, enquanto a pasta `workspace` será o seu diretório de trabalho.
 
 ```bash
-curl https://install.duckdb.org | sh
+docker run -it -v $(pwd)/data:/data:ro -v $(pwd)/workspace:/workspace lab-parquet
 ```
 
-Crie um link simbólico para o executável do DuckDB:
-
-```bash
-sudo ln -s ~/.duckdb/cli/latest/duckdb /usr/local/bin/duckdb
-```
+Você agora está dentro do container, no diretório `/workspace`.
 
 ## 3. Preparação dos Dados (Limpeza em Tempo Real)
 
-Inicie o DuckDB no terminal do Linux digitando o comando abaixo:
+Inicie o DuckDB no terminal do container digitando o comando abaixo:
 
 ```bash
 duckdb
@@ -73,7 +76,8 @@ SET threads = 1;
 
 ## 4. Criando os Cenários (As Variantes Parquet)
 
-Vamos criar 4 versões do mesmo arquivo para testar como o tamanho dos *Row Groups* e os algoritmos de compressão afetam o sistema. Execute as queries abaixo no CLI do DuckDB:
+Vamos criar 4 versões do mesmo arquivo para testar como o tamanho dos *Row Groups* e os algoritmos de compressão afetam o sistema. Execute as queries abaixo no CLI do DuckDB. 
+*Nota: estamos lendo o CSV da pasta mapeada de leitura (`/data/`), mas os arquivos Parquet serão gravados automaticamente no diretório atual (`/workspace/`).*
 
 **1. O Padrão (Otimizado - ZSTD + Row Group Default)**
 O DuckDB utiliza compressão ZSTD por padrão, oferecendo uma excelente taxa de compressão.
@@ -83,7 +87,7 @@ COPY (
     SELECT 
         *, 
         CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
-    FROM read_csv('202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
+    FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
 ) TO 'bolsa_padrao.parquet' (FORMAT PARQUET, COMPRESSION 'ZSTD');
 ```
 
@@ -95,7 +99,7 @@ COPY (
     SELECT 
         *, 
         CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
-    FROM read_csv('202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
+    FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
 ) TO 'bolsa_snappy.parquet' (FORMAT PARQUET, COMPRESSION 'SNAPPY');
 ```
 
@@ -107,7 +111,7 @@ COPY (
     SELECT 
         *, 
         CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
-    FROM read_csv('202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
+    FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
 ) TO 'bolsa_rg_pequeno.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 10000);
 ```
 
@@ -119,7 +123,7 @@ COPY (
     SELECT 
         *, 
         CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
-    FROM read_csv('202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
+    FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
 ) TO 'bolsa_rg_gigante.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 1000000);
 ```
 
@@ -127,13 +131,13 @@ COPY (
 
 ## 5. Teste de I/O e Storage (Terminal do Sistema Operacional)
 
-Saia do CLI do DuckDB para voltar ao terminal do Linux executando:
+Saia do CLI do DuckDB para voltar ao terminal do container executando:
 
 ```sql
 .exit
 ```
 
-Vamos analisar os arquivos gerados no nível do sistema operacional.
+Vamos analisar os arquivos gerados no nível do sistema operacional (dentro de `/workspace`).
 
 Compare o tamanho real dos arquivos no disco:
 
@@ -141,7 +145,7 @@ Compare o tamanho real dos arquivos no disco:
 ls -lh bolsa_*.parquet
 ```
 
-Utilize o `parquet-tools` instalado no início do laboratório para inspecionar a quantidade de *Row Groups* alocada em cada arquivo:
+Utilize o `parquet-tools` (já embutido no container) para inspecionar a quantidade de *Row Groups* alocada em cada arquivo:
 
 ```bash
 parquet-tools inspect bolsa_padrao.parquet | grep "num_row_groups:"
@@ -161,7 +165,7 @@ parquet-tools inspect bolsa_rg_gigante.parquet | grep "num_row_groups:"
 
 ## 6. Teste de Performance (No DuckDB)
 
-Inicie o DuckDB novamente no terminal do Linux:
+Inicie o DuckDB novamente no terminal do container:
 
 ```bash
 duckdb
