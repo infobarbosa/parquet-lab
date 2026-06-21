@@ -1,0 +1,8 @@
+# python virtual environment
+.venv
+
+# arquivos parquet
+*.parquet
+
+# arquivos csv
+*.csv
