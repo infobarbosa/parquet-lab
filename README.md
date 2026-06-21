@@ -7,7 +7,8 @@
 
 - Explorar arquivos Parquet usando DuckDB
 - Comparar tamanho dos arquivos no disco
-- Comparar performance em diferentes cenários
+- Comparar performance de algoritmos de compressão vs I/O bruto
+- Compreender o impacto do tamanho dos *Row Groups* em consultas
 
 ## 2. Setup do Ambiente (Via Docker)
 
@@ -74,57 +75,70 @@ SET threads = 1;
 
 ---
 
-## 4. Criando os Cenários (As Variantes Parquet)
+## 4. Criando a Matriz de Cenários
 
-Vamos criar 4 versões do mesmo arquivo para testar como o tamanho dos *Row Groups* e os algoritmos de compressão afetam o sistema. Execute as queries abaixo no CLI do DuckDB. 
+Vamos criar **7 versões** do mesmo arquivo para testar cruzamentos entre algoritmos de compressão (Uncompressed, ZSTD, Snappy) e tamanhos de blocos (*Row Groups*). Execute as queries abaixo no CLI do DuckDB. 
 *Nota: estamos lendo o CSV da pasta mapeada de leitura (`/data/`), mas os arquivos Parquet serão gravados automaticamente no diretório atual (`/workspace/`).*
 
-**1. O Padrão (Otimizado - ZSTD + Row Group Default)**
-O DuckDB utiliza compressão ZSTD por padrão, oferecendo uma excelente taxa de compressão.
-
+**1. Sem Compressão (O Gargalo Físico)**
+Desabilitando a compressão para expor o custo puro de I/O de disco.
 ```sql
 COPY (
-    SELECT 
-        *, 
-        CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
+    SELECT *, CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
     FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
-) TO 'bolsa_padrao.parquet' (FORMAT PARQUET, COMPRESSION 'ZSTD');
+) TO 'bolsa_uncompressed.parquet' (FORMAT PARQUET, COMPRESSION 'UNCOMPRESSED');
 ```
 
-**2. Foco em Velocidade de Leitura (Snappy)**
-O algoritmo Snappy comprime menos do que o ZSTD, resultando em arquivos maiores no disco, porém consome menos processamento (CPU) durante a descompressão.
-
+**2. Compressão ZSTD Padrão**
+O DuckDB utiliza ZSTD com Row Groups de 122.880 linhas por padrão, oferecendo altíssima compressão.
 ```sql
 COPY (
-    SELECT 
-        *, 
-        CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
+    SELECT *, CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
+    FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
+) TO 'bolsa_zstd.parquet' (FORMAT PARQUET, COMPRESSION 'ZSTD');
+```
+
+**3. Compressão Snappy Padrão**
+O Snappy comprime menos do que o ZSTD (arquivo maior), mas exige menos ciclos de CPU na descompressão.
+```sql
+COPY (
+    SELECT *, CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
     FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
 ) TO 'bolsa_snappy.parquet' (FORMAT PARQUET, COMPRESSION 'SNAPPY');
 ```
 
-**3. Row Groups Minúsculos (Overhead de Metadados)**
-Neste cenário forçamos grupos de apenas 10.000 linhas. Isso aumenta consideravelmente a proporção de metadados no arquivo, gerando um *footer* substancialmente maior.
-
+**4. ZSTD com Row Groups Minúsculos (10k linhas)**
+Isso aumenta consideravelmente a proporção de metadados no arquivo, gerando um *footer* substancialmente maior.
 ```sql
 COPY (
-    SELECT 
-        *, 
-        CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
+    SELECT *, CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
     FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
-) TO 'bolsa_rg_pequeno.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 10000);
+) TO 'bolsa_zstd_rg10k.parquet' (FORMAT PARQUET, COMPRESSION 'ZSTD', ROW_GROUP_SIZE 10000);
 ```
 
-**4. Row Groups Gigantes**
-Forçando grupos de 1.000.000 de linhas. Otimizado para *Full Table Scans*, mas ineficiente para filtros muito granulares, pois exige o carregamento de blocos imensos de dados na memória.
-
+**5. ZSTD com Row Groups Gigantes (1 Milhão de linhas)**
+Otimizado para leituras completas (*Full Scans*), mas penaliza filtros extremamente granulares.
 ```sql
 COPY (
-    SELECT 
-        *, 
-        CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
+    SELECT *, CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
     FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
-) TO 'bolsa_rg_gigante.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 1000000);
+) TO 'bolsa_zstd_rg1mm.parquet' (FORMAT PARQUET, COMPRESSION 'ZSTD', ROW_GROUP_SIZE 1000000);
+```
+
+**6. Snappy com Row Groups Minúsculos (10k linhas)**
+```sql
+COPY (
+    SELECT *, CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
+    FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
+) TO 'bolsa_snappy_rg10k.parquet' (FORMAT PARQUET, COMPRESSION 'SNAPPY', ROW_GROUP_SIZE 10000);
+```
+
+**7. Snappy com Row Groups Gigantes (1 Milhão de linhas)**
+```sql
+COPY (
+    SELECT *, CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL(10,2)) AS VALOR_NUMERICO
+    FROM read_csv('/data/202604_NovoBolsaFamilia.csv', encoding='latin-1', delim=';')
+) TO 'bolsa_snappy_rg1mm.parquet' (FORMAT PARQUET, COMPRESSION 'SNAPPY', ROW_GROUP_SIZE 1000000);
 ```
 
 ---
@@ -139,27 +153,27 @@ Saia do CLI do DuckDB para voltar ao terminal do container executando:
 
 Vamos analisar os arquivos gerados no nível do sistema operacional (dentro de `/workspace`).
 
-Compare o tamanho real dos arquivos no disco:
+Compare o peso de todos os arquivos:
 
 ```bash
 ls -lh bolsa_*.parquet
 ```
 
-Utilize o `parquet-tools` (já embutido no container) para inspecionar a quantidade de *Row Groups* alocada em cada arquivo:
+Utilize o `parquet-tools` (já embutido no container) para provar as partições internas (quantidade de *Row Groups*) alocadas:
 
 ```bash
-parquet-tools inspect bolsa_padrao.parquet | grep "num_row_groups:"
+parquet-tools inspect bolsa_zstd.parquet | grep "num_row_groups:"
 ```
 
 ```bash
-parquet-tools inspect bolsa_rg_pequeno.parquet | grep "num_row_groups:"
+parquet-tools inspect bolsa_zstd_rg10k.parquet | grep "num_row_groups:"
 ```
 
 ```bash
-parquet-tools inspect bolsa_rg_gigante.parquet | grep "num_row_groups:"
+parquet-tools inspect bolsa_zstd_rg1mm.parquet | grep "num_row_groups:"
 ```
 
-**O que observar:** O arquivo `bolsa_rg_pequeno.parquet` provavelmente será maior no disco do que o `padrao` ou o `gigante` devido ao excesso de metadados. Da mesma forma, o arquivo formatado com `snappy` será maior que o `padrao` (ZSTD).
+**Análise Técnica:** O arquivo `bolsa_uncompressed.parquet` será massivamente maior que todos os outros. Entre os arquivos compactados, os que possuem a marcação `rg10k` tendem a ser ligeiramente maiores em disco do que suas contrapartes normais e `rg1mm` devido à explosão de blocos de metadados no rodapé. Da mesma forma, os arquivos formatados com `snappy` serão maiores que os formatados com `zstd`.
 
 ---
 
@@ -171,53 +185,54 @@ Inicie o DuckDB novamente no terminal do container:
 duckdb
 ```
 
-Não se esqueça de habilitar o timer para os testes de stress:
+Habilite o timer para os testes de stress:
 
 ```sql
 .timer on
 ```
 
-**Cenário A: O Agregador (Full Scan numa única coluna)**
-O banco lerá apenas a coluna de valores, ignorando o restante da tabela. Execute a query abaixo para os 4 arquivos alterando apenas a cláusula `FROM`:
+**Cenário A: O Paradoxo da Compressão (Full Scan em Coluna)**
+O banco varrerá apenas a coluna de valores em todo o arquivo. Compare o tempo de execução entre carregar os dados brutos de disco vs descomprimir na CPU.
 
 ```sql
-SELECT UF, SUM(VALOR_NUMERICO) FROM 'bolsa_padrao.parquet' GROUP BY UF;
+SELECT UF, SUM(VALOR_NUMERICO) FROM 'bolsa_uncompressed.parquet' GROUP BY UF;
+```
+
+```sql
+SELECT UF, SUM(VALOR_NUMERICO) FROM 'bolsa_zstd.parquet' GROUP BY UF;
 ```
 
 ```sql
 SELECT UF, SUM(VALOR_NUMERICO) FROM 'bolsa_snappy.parquet' GROUP BY UF;
 ```
 
-```sql
-SELECT UF, SUM(VALOR_NUMERICO) FROM 'bolsa_rg_gigante.parquet' GROUP BY UF;
-```
-
-```sql
-SELECT UF, SUM(VALOR_NUMERICO) FROM 'bolsa_rg_pequeno.parquet' GROUP BY UF;
-```
-
-*Análise Técnica:* O arquivo `bolsa_rg_gigante.parquet` ou o `bolsa_snappy.parquet` tendem a apresentar o melhor desempenho aqui, pois a leitura sequencial de blocos grandes de apenas uma coluna evidencia a principal vantagem do formato colunar.
+*Análise Técnica:* É muito comum que a execução no arquivo `uncompressed` seja significativamente **mais lenta**, mesmo não gastando CPU com descompressão. Isso prova que o I/O de disco é o maior gargalo no Big Data, justificando o uso de tecnologias como ZSTD e Snappy para trafegar menos dados físicos.
 
 **Cenário B: O Filtro Empurrado (Predicate Pushdown)**
-Vamos testar a estatística de metadados buscando por um estado específico.
+Vamos testar a estatística de metadados buscando por um estado específico em um arquivo com blocos imensos.
 
 ```sql
 SELECT "NOME FAVORECIDO", VALOR_NUMERICO 
-FROM 'bolsa_rg_gigante.parquet' 
+FROM 'bolsa_zstd_rg1mm.parquet' 
 WHERE UF = 'AC';
 ```
 
-*Análise Técnica:* O mecanismo de consulta analisará os metadados do arquivo (rodapé), verificará os valores mínimos e máximos da coluna `UF` por *Row Group* e descartará as leituras completas dos blocos que não possuírem dados do Acre. Compare o tempo de execução desta mesma query em relação ao arquivo `bolsa_padrao.parquet`.
+*Análise Técnica:* O mecanismo de consulta lerá o rodapé do arquivo, verificará os valores mínimos e máximos da coluna `UF` por *Row Group* e descartará a leitura completa de blocos que não possuam dados do Acre. 
 
 **Cenário C: Sobrecarga em Buscas Pontuais (Point Lookups)**
-Vamos buscar uma única linha usando um identificador único, e solicitar o retorno de todas as colunas.
+Vamos buscar um registro isolado, pedindo que o banco traga `SELECT *`. Note os arquivos usados: compare o arquivo com blocos minúsculos vs blocos gigantes.
 
 ```sql
-SELECT * FROM 'bolsa_rg_pequeno.parquet' 
+SELECT * FROM 'bolsa_zstd_rg10k.parquet' 
 WHERE "NIS FAVORECIDO" = 16250240692; -- Use um NIS válido da sua base
 ```
 
-*Análise Técnica:* Esta é uma das principais desvantagens dos formatos colunares. Para retornar `SELECT *`, o banco de dados precisa encontrar a linha correspondente através dos blocos colunares individuais e depois reconstruir o registro completo juntando fisicamente os valores separados. O arquivo particionado com *Row Groups* pequenos pode apresentar um desempenho levemente superior aqui, pois o bloco a ser descomprimido para encontrar o registro único é menor.
+```sql
+SELECT * FROM 'bolsa_zstd_rg1mm.parquet' 
+WHERE "NIS FAVORECIDO" = 16250240692;
+```
+
+*Análise Técnica:* O formato colunar não é feito para retornar todas as colunas de uma única linha. O motor precisa encontrar a linha através das colunas individuais e depois materializar o registro juntando fisicamente os valores. Aqui, o arquivo `rg10k` pode performar melhor que o `rg1mm`, pois o bloco a ser descomprimido para encontrar o NIS e extrair as demais colunas é 100 vezes menor.
 
 ---
 
@@ -225,12 +240,12 @@ WHERE "NIS FAVORECIDO" = 16250240692; -- Use um NIS válido da sua base
 
 Para comprovar fisicamente a eficiência do *Predicate Pushdown* (Filtro Empurrado), vamos inspecionar a árvore de execução gerada pelo banco de dados.
 
-Com o DuckDB ainda aberto, utilize o comando `EXPLAIN ANALYZE` antes da query do cenário B:
+Com o DuckDB aberto, utilize o comando `EXPLAIN ANALYZE` antes da query do cenário B:
 
 ```sql
 EXPLAIN ANALYZE 
 SELECT "NOME FAVORECIDO", VALOR_NUMERICO 
-FROM 'bolsa_rg_gigante.parquet' 
+FROM 'bolsa_zstd_rg1mm.parquet' 
 WHERE UF = 'AC';
 ```
 
